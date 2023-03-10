@@ -2,6 +2,10 @@
 name = "sleigh4rust"
 version = "0.1.0"
 edition = "2021"
+readme = "README.md"
+repository = "https://github.com/rbran/sleigh4rust"
+license = "MIT"
+description = "A series of common interfaces and functions used by the sleigh-rs projects"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
