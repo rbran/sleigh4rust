@@ -34,8 +34,7 @@ macro_rules! memory_read_bits {
     ) => {
         fn $read_unsigned<const BIG_ENDIAN: bool>(
             &self,
-            varnode_addr: Self::AddressType,
-            varnode_len: Self::AddressType,
+            addr: Self::AddressType,
             varnode_lsb: usize,
             data_bits: usize,
         ) -> Result<$unsigned_type, MemoryReadError<Self::AddressType>> {
@@ -45,14 +44,6 @@ macro_rules! memory_read_bits {
             let data_lsb = varnode_lsb % 8;
             let read_bytes = (data_bits + data_lsb + 7) / 8;
             assert!(read_bytes <= TYPE_BYTES);
-            let data_addr_offset = if BIG_ENDIAN {
-                (usize::try_from(varnode_len).unwrap() - read_bytes)
-                    - (varnode_lsb / 8)
-            } else {
-                varnode_lsb / 8
-            };
-            let data_addr = varnode_addr
-                + <Self::AddressType>::try_from(data_addr_offset).unwrap();
 
             let data_start = if BIG_ENDIAN {
                 TYPE_BYTES - read_bytes
@@ -61,7 +52,7 @@ macro_rules! memory_read_bits {
             };
             let data_end = data_start + read_bytes;
             let mut data = [0u8; TYPE_BYTES];
-            self.read(data_addr, &mut data[data_start..data_end])?;
+            self.read(addr, &mut data[data_start..data_end])?;
             let data = if BIG_ENDIAN {
                 <$unsigned_type>::from_be_bytes(data)
             } else {
@@ -72,19 +63,14 @@ macro_rules! memory_read_bits {
         }
         fn $read_signed<const BIG_ENDIAN: bool>(
             &self,
-            varnode_addr: Self::AddressType,
-            varnode_len: Self::AddressType,
+            addr: Self::AddressType,
             start_bit: usize,
             len_bits: usize,
         ) -> Result<$signed_type, MemoryReadError<Self::AddressType>> {
             const TYPE_BITS: usize = <$signed_type>::BITS as usize;
             assert!(len_bits > 1);
-            let data = self.$read_unsigned::<BIG_ENDIAN>(
-                varnode_addr,
-                varnode_len,
-                start_bit,
-                len_bits,
-            )?;
+            let data =
+                self.$read_unsigned::<BIG_ENDIAN>(addr, start_bit, len_bits)?;
             let value_mask = <$unsigned_type>::try_from(<$signed_type>::MAX)
                 .unwrap()
                 >> (TYPE_BITS - len_bits);
@@ -116,8 +102,7 @@ macro_rules! memory_write_bits {
         fn $write_unsigned<const BIG_ENDIAN: bool>(
             &mut self,
             value: $unsigned_type,
-            varnode_addr: Self::AddressType,
-            varnode_len: Self::AddressType,
+            addr: Self::AddressType,
             varnode_lsb: usize,
             data_bits: usize,
         ) -> Result<(), MemoryWriteError<Self::AddressType>> {
@@ -127,15 +112,6 @@ macro_rules! memory_write_bits {
             let data_lsb = varnode_lsb % 8;
             let read_bytes = (data_bits + data_lsb + 7) / 8;
             assert!(read_bytes <= TYPE_BYTES);
-            let data_addr_offset = if BIG_ENDIAN {
-                (usize::try_from(varnode_len).unwrap() - read_bytes)
-                    - (varnode_lsb / 8)
-            } else {
-                varnode_lsb / 8
-            };
-            let data_addr = varnode_addr
-                + <Self::AddressType>::try_from(data_addr_offset).unwrap();
-
             let data_start = if BIG_ENDIAN {
                 TYPE_BYTES - read_bytes
             } else {
@@ -143,7 +119,7 @@ macro_rules! memory_write_bits {
             };
             let data_end = data_start + read_bytes;
             let mut mem = [0u8; TYPE_BYTES];
-            self.read(data_addr, &mut mem[data_start..data_end])?;
+            self.read(addr, &mut mem[data_start..data_end])?;
             let mut mem = if BIG_ENDIAN {
                 <$unsigned_type>::from_be_bytes(mem)
             } else {
@@ -159,13 +135,12 @@ macro_rules! memory_write_bits {
             } else {
                 final_mem.to_le_bytes()
             };
-            self.write(data_addr, &final_mem[data_start..data_end])
+            self.write(addr, &final_mem[data_start..data_end])
         }
         fn $write_signed<const BIG_ENDIAN: bool>(
             &mut self,
             value: $signed_type,
-            varnode_addr: Self::AddressType,
-            varnode_len: Self::AddressType,
+            addr: Self::AddressType,
             start_bit: usize,
             len_bits: usize,
         ) -> Result<(), MemoryWriteError<Self::AddressType>> {
@@ -181,19 +156,68 @@ macro_rules! memory_write_bits {
             };
             let mask = <$unsigned_type>::MAX >> (TYPE_BITS - len_bits);
             let value = value & mask;
-            self.$write_unsigned::<BIG_ENDIAN>(
-                value,
-                varnode_addr,
-                varnode_len,
-                start_bit,
-                len_bits,
-            )
+            self.$write_unsigned::<BIG_ENDIAN>(value, addr, start_bit, len_bits)
         }
     };
 }
 
-pub type IntTypeS = i64;
-pub type IntTypeU = u64;
+pub type FloatType = f64;
+pub type NumberUnsigned = u64;
+pub type NumberSigned = i64;
+pub type NumberSuperSigned = i128;
+pub type NumberSuperUnsigned = u128;
+pub type NumberNonZeroUnsigned = core::num::NonZeroU64;
+pub type NumberNonZeroSigned = core::num::NonZeroI64;
+pub type NumberNonZeroSuperSigned = core::num::NonZeroI128;
+
+//old naming convention
+pub type IntTypeU = NumberUnsigned;
+pub type IntTypeS = NumberSigned;
+pub type NonZeroTypeU = NumberNonZeroUnsigned;
+pub type NonZeroTypeS = NumberNonZeroSigned;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum Endian {
+    Little,
+    Big,
+}
+
+impl Endian {
+    pub fn is_little(&self) -> bool {
+        matches!(self, Self::Little)
+    }
+    pub fn is_big(&self) -> bool {
+        matches!(self, Self::Big)
+    }
+}
+
+pub fn bytes_from_varnode<T>(
+    big_endian: bool,
+    varnode_addr: T,
+    varnode_len: T,
+    varnode_lsb: T,
+    data_bits: T,
+) -> (T, T)
+where
+    T: core::ops::Add<Output = T>
+        + core::ops::Sub<Output = T>
+        + core::ops::Div<Output = T>
+        + core::ops::Rem<Output = T>
+        + core::cmp::PartialOrd<T>
+        + Copy
+        + From<u8>,
+{
+    assert!(data_bits > 0.into());
+    let data_lsb = varnode_lsb % 8.into();
+    let read_bytes = (data_bits + data_lsb + 7.into()) / 8.into();
+    let data_addr_offset = if big_endian {
+        (varnode_len - read_bytes) - (varnode_lsb / 8.into())
+    } else {
+        varnode_lsb / 8.into()
+    };
+    let data_lsb = varnode_lsb % 8.into();
+    (varnode_addr + data_addr_offset, data_lsb)
+}
 
 #[derive(Debug)]
 pub enum MemoryReadError<T> {
@@ -288,7 +312,7 @@ impl<Reg: Display> Display for DisplayElement<Reg> {
 
 #[cfg(test)]
 mod test {
-    use crate::{MemoryRead, MemoryWrite};
+    use crate::{bytes_from_varnode, MemoryRead, MemoryWrite};
 
     struct MyMemory<const LEN: usize>([u8; LEN]);
     impl<const LEN: usize> MemoryRead for MyMemory<LEN> {
@@ -314,61 +338,138 @@ mod test {
             Ok(())
         }
     }
+    //I'm lazy
+    trait Ligma: MemoryRead<AddressType = usize> + MemoryWrite {
+        fn my_read_u8<const BIG: bool>(
+            &self,
+            varnode_addr: usize,
+            varnode_len: usize,
+            varnode_lsb: usize,
+            data_bits: usize,
+        ) -> u8 {
+            assert!(data_bits <= u8::BITS as usize);
+            let (data_addr, data_lsb) = bytes_from_varnode(
+                BIG,
+                varnode_addr,
+                varnode_len,
+                varnode_lsb,
+                data_bits,
+            );
+            self.read_u8::<BIG>(data_addr, data_lsb, data_bits).unwrap()
+        }
+        fn my_read_u32<const BIG: bool>(
+            &self,
+            varnode_addr: usize,
+            varnode_len: usize,
+            varnode_lsb: usize,
+            data_bits: usize,
+        ) -> u32 {
+            assert!(data_bits <= u32::BITS as usize);
+            let (data_addr, data_lsb) = bytes_from_varnode(
+                BIG,
+                varnode_addr,
+                varnode_len,
+                varnode_lsb,
+                data_bits,
+            );
+            self.read_u32::<BIG>(data_addr, data_lsb, data_bits)
+                .unwrap()
+        }
+        fn my_write_u8<const BIG: bool>(
+            &mut self,
+            value: u8,
+            varnode_addr: usize,
+            varnode_len: usize,
+            varnode_lsb: usize,
+            data_bits: usize,
+        ) {
+            assert!(data_bits <= u8::BITS as usize);
+            let (data_addr, data_lsb) = bytes_from_varnode(
+                BIG,
+                varnode_addr,
+                varnode_len,
+                varnode_lsb,
+                data_bits,
+            );
+            self.write_u8::<BIG>(value, data_addr, data_lsb, data_bits)
+                .unwrap()
+        }
+        fn my_write_u16<const BIG: bool>(
+            &mut self,
+            value: u16,
+            varnode_addr: usize,
+            varnode_len: usize,
+            varnode_lsb: usize,
+            data_bits: usize,
+        ) {
+            assert!(data_bits <= u16::BITS as usize);
+            let (data_addr, data_lsb) = bytes_from_varnode(
+                BIG,
+                varnode_addr,
+                varnode_len,
+                varnode_lsb,
+                data_bits,
+            );
+            self.write_u16::<BIG>(value, data_addr, data_lsb, data_bits)
+                .unwrap()
+        }
+    }
+    impl<const LEN: usize> Ligma for MyMemory<LEN> {}
     #[test]
     fn memory_read() {
         let value = 0x1FF9855u32;
         let le = MyMemory(value.to_le_bytes());
         let be = MyMemory(value.to_be_bytes());
-        assert_eq!(be.read_u8::<true>(0, 4, 0, 8).unwrap(), 0x55);
-        assert_eq!(le.read_u8::<false>(0, 4, 0, 8).unwrap(), 0x55);
-        assert_eq!(be.read_u32::<true>(0, 4, 15, 10).unwrap(), 0x3FF);
-        assert_eq!(le.read_u32::<false>(0, 4, 15, 10).unwrap(), 0x3FF);
-        assert_eq!(be.read_u8::<true>(0, 4, 10, 4).unwrap(), 0b0110);
-        assert_eq!(le.read_u8::<false>(0, 4, 10, 4).unwrap(), 0b0110);
-        assert_eq!(be.read_u8::<true>(0, 4, 24, 3).unwrap(), 1);
-        assert_eq!(le.read_u8::<false>(0, 4, 24, 3).unwrap(), 1);
+        assert_eq!(be.my_read_u8::<true>(0, 4, 0, 8), 0x55);
+        assert_eq!(le.my_read_u8::<false>(0, 4, 0, 8), 0x55);
+        assert_eq!(be.my_read_u32::<true>(0, 4, 15, 10), 0x3FF);
+        assert_eq!(le.my_read_u32::<false>(0, 4, 15, 10), 0x3FF);
+        assert_eq!(be.my_read_u8::<true>(0, 4, 10, 4), 0b0110);
+        assert_eq!(le.my_read_u8::<false>(0, 4, 10, 4), 0b0110);
+        assert_eq!(be.my_read_u8::<true>(0, 4, 24, 3), 1);
+        assert_eq!(le.my_read_u8::<false>(0, 4, 24, 3), 1);
     }
     #[test]
     fn memory_write() {
         let mut le = MyMemory([0u8; 4]);
         let mut be = MyMemory([0u8; 4]);
-        le.write_u8::<false>(5, 0, 4, 0, 3).unwrap();
-        be.write_u8::<true>(5, 0, 4, 0, 3).unwrap();
+        le.my_write_u8::<false>(5, 0, 4, 0, 3);
+        be.my_write_u8::<true>(5, 0, 4, 0, 3);
         assert_eq!(u32::from_be_bytes(be.0), 0x5);
         assert_eq!(u32::from_le_bytes(le.0), 0x5);
-        le.write_u8::<false>(5, 0, 4, 4, 4).unwrap();
-        be.write_u8::<true>(5, 0, 4, 4, 4).unwrap();
+        le.my_write_u8::<false>(5, 0, 4, 4, 4);
+        be.my_write_u8::<true>(5, 0, 4, 4, 4);
         assert_eq!(u32::from_be_bytes(be.0), 0x55);
         assert_eq!(u32::from_le_bytes(le.0), 0x55);
-        le.write_u8::<false>(0x13, 0, 4, 11, 5).unwrap();
-        be.write_u8::<true>(0x13, 0, 4, 11, 5).unwrap();
+        le.my_write_u8::<false>(0x13, 0, 4, 11, 5);
+        be.my_write_u8::<true>(0x13, 0, 4, 11, 5);
         assert_eq!(u32::from_be_bytes(be.0), 0x9855);
         assert_eq!(u32::from_le_bytes(le.0), 0x9855);
-        le.write_u16::<false>(0xFF, 0, 4, 17, 9).unwrap();
-        be.write_u16::<true>(0xFF, 0, 4, 17, 9).unwrap();
+        le.my_write_u16::<false>(0xFF, 0, 4, 17, 9);
+        be.my_write_u16::<true>(0xFF, 0, 4, 17, 9);
         assert_eq!(u32::from_be_bytes(be.0), 0x1FE9855);
         assert_eq!(u32::from_le_bytes(le.0), 0x1FE9855);
-        le.write_u8::<false>(1, 0, 4, 16, 1).unwrap();
-        be.write_u8::<true>(1, 0, 4, 16, 1).unwrap();
+        le.my_write_u8::<false>(1, 0, 4, 16, 1);
+        be.my_write_u8::<true>(1, 0, 4, 16, 1);
         assert_eq!(u32::from_be_bytes(be.0), 0x1FF9855);
         assert_eq!(u32::from_le_bytes(le.0), 0x1FF9855);
-        le.write_u8::<false>(0, 0, 4, 16, 1).unwrap();
-        be.write_u8::<true>(0, 0, 4, 16, 1).unwrap();
+        le.my_write_u8::<false>(0, 0, 4, 16, 1);
+        be.my_write_u8::<true>(0, 0, 4, 16, 1);
         assert_eq!(u32::from_be_bytes(be.0), 0x1FE9855);
         assert_eq!(u32::from_le_bytes(le.0), 0x1FE9855);
-        le.write_u16::<false>(0, 0, 4, 17, 9).unwrap();
-        be.write_u16::<true>(0, 0, 4, 17, 9).unwrap();
+        le.my_write_u16::<false>(0, 0, 4, 17, 9);
+        be.my_write_u16::<true>(0, 0, 4, 17, 9);
         assert_eq!(u32::from_be_bytes(be.0), 0x9855);
         assert_eq!(u32::from_le_bytes(le.0), 0x9855);
-        le.write_u8::<false>(0, 0, 4, 11, 5).unwrap();
-        be.write_u8::<true>(0, 0, 4, 11, 5).unwrap();
+        le.my_write_u8::<false>(0, 0, 4, 11, 5);
+        be.my_write_u8::<true>(0, 0, 4, 11, 5);
         assert_eq!(u32::from_be_bytes(be.0), 0x55);
         assert_eq!(u32::from_le_bytes(le.0), 0x55);
-        le.write_u8::<false>(0, 0, 4, 4, 4).unwrap();
-        be.write_u8::<true>(0, 0, 4, 4, 4).unwrap();
+        le.my_write_u8::<false>(0, 0, 4, 4, 4);
+        be.my_write_u8::<true>(0, 0, 4, 4, 4);
         assert_eq!(u32::from_be_bytes(be.0), 0x5);
         assert_eq!(u32::from_le_bytes(le.0), 0x5);
-        le.write_u8::<false>(0, 0, 4, 0, 3).unwrap();
-        be.write_u8::<true>(0, 0, 4, 0, 3).unwrap();
+        le.my_write_u8::<false>(0, 0, 4, 0, 3);
+        be.my_write_u8::<true>(0, 0, 4, 0, 3);
     }
 }
